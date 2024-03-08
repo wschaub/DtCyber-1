@@ -463,6 +463,7 @@ extern const i8            altKeyToPlato[128];
 extern const u16           asciiTo026[256];
 extern const u16           asciiTo029[256];
 extern const u8            asciiToBcd[256];
+extern const u8            asciiToExtBcd[256];
 extern const u8            asciiToCdc[256];
 extern const u8            asciiToConsole[256];
 extern const u8            asciiToEbcdic[256];
