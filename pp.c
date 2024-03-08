@@ -1303,6 +1303,7 @@ static void ppOpIAN(void)     // 70
         {
         activePpu->opF             = opF;
         activePpu->opD             = opD;
+        activeChannel   = channel + (activePpu->opD & 037);
         activeChannel->delayStatus = 0;
         }
 
@@ -1451,6 +1452,7 @@ static void ppOpOAN(void)     // 72
         {
         activePpu->opF             = opF;
         activePpu->opD             = opD;
+        activeChannel   = channel + (activePpu->opD & 037);
         activeChannel->delayStatus = 0;
         }
 
