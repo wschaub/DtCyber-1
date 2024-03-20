@@ -25,8 +25,8 @@
 **--------------------------------------------------------------------------
 */
 
-#define DEBUG    0
-
+#define DEBUG    1
+#define PPDEBUG 0
 /*
 **  -------------
 **  Include Files
@@ -137,7 +137,7 @@ typedef struct tapeParam
     u8               eqNo;
     u8               unitNo;
     char             fileName[MaxFSPath];
-
+    u8               emptyCycles; //number of reads that return empty
     /*
     **  Format parameters.
     */
@@ -225,7 +225,10 @@ static void mt362xLogByte(int b);
 
 static char mt362xLogBuf[LogLineLength + 1];
 static int  mt362xLogCol = 0;
-
+static void mt362xLogPpOp(char prefix);
+#if PPDEBUG
+extern PpByte opF;
+#endif
 /*--------------------------------------------------------------------------
 **  Purpose:        Flush incomplete numeric/ascii data line
 **
@@ -245,6 +248,7 @@ static void mt362xLogFlush(void)
     memset(mt362xLogBuf, ' ', LogLineLength);
     mt362xLogBuf[0]             = '\n';
     mt362xLogBuf[LogLineLength] = '\0';
+    fflush(NULL);
     }
 
 /*--------------------------------------------------------------------------
@@ -259,7 +263,6 @@ static void mt362xLogByte(int b)
     {
     char octal[10];
     int  col;
-
     col = OctalColumn(mt362xLogCol);
     sprintf(octal, "%04o ", b);
     memcpy(mt362xLogBuf + col, octal, 5);
@@ -274,6 +277,77 @@ static void mt362xLogByte(int b)
     }
 
 #endif
+
+static void mt362xLogPpOp(char prefix) {
+     #if PPDEBUG
+     PpByte opcode;
+     if(activePpu->busy) {
+         opcode = activePpu->opF;
+     } else {
+         opcode = opF;
+     }
+     fprintf(mt362xLog,"\ncycles = %u ",cycles);
+     switch(opcode){
+         case 0064:
+             fprintf(mt362xLog,"\n%c:AJM %d by PP:%02o regP:%06o",prefix,
+                     activeChannel->active,
+                     activePpu->id,activePpu->regP);
+             break;
+         case 0065:
+             fprintf(mt362xLog,"\n%c:IJM %d by PP:%02o regP:%06o",prefix,
+                     activeChannel->active,
+                     activePpu->id,activePpu->regP);
+             break;
+         case 0066:
+             fprintf(mt362xLog,"\n%c:FJM %d by PP:%02o regP:%06o",prefix,
+                     activeChannel->full,
+                     activePpu->id,activePpu->regP);
+             break;
+         case 0067:
+             fprintf(mt362xLog,"\n%c:EJM %d by PP:%02o regP:%06o",prefix,
+                     activeChannel->full,
+                     activePpu->id,activePpu->regP);
+             break;
+         case 0070:
+             fprintf(mt362xLog,"\n%c:IAN by PP:%02o regP:%06o >",prefix,
+                     activePpu->id,activePpu->regP);
+             break;
+         case 0071:
+             /*fprintf(mt362xLog,"\n%c:IAM by PP:%02o regP:%06o >",prefix,
+                     activePpu->id,activePpu->regP);*/
+             break;
+         case 0072:
+             fprintf(mt362xLog,"\n%c:OAN by PP:%02o regP:%06o >",prefix,
+                     activePpu->id,activePpu->regP);
+             break;
+         case 0073:
+             /*fprintf(mt362xLog,"\n%c:OAM by PP:%02o regP:%06o >",prefix,
+                     activePpu->id,activePpu->regP);
+             break; */
+         case 0074:
+             if(activePpu->busy)
+                 return;
+             fprintf(mt362xLog,"\n%c:ACN %d by PP:%02o regP:%06o",prefix,activeChannel->active,
+                     activePpu->id,activePpu->regP);
+             break;
+         case 0075:
+             fprintf(mt362xLog,"\n%c:DCN %d by PP:%02o regP:%06o",prefix,activeChannel->active,
+                     activePpu->id,activePpu->regP);
+             break;
+         case 0076:
+             fprintf(mt362xLog,"\n%c:FAN %d by PP:%02o regP:%06o",prefix,activeChannel->active,
+                     activePpu->id,activePpu->regP);
+             break;
+         case 0077:
+             fprintf(mt362xLog,"\n%c:FNC %d by PP:%02o regP:%06o",prefix,activeChannel->active,
+                     activePpu->id,activePpu->regP);
+             break;
+
+         default:
+             fprintf(mt362xLog,"\n%c:PP op %03o",prefix,opcode);
+     }    
+     #endif
+}
 
 /*
  **--------------------------------------------------------------------------
@@ -821,7 +895,6 @@ static void mt362xSetupStatus(TapeParam *tp)
     case 556:
         tp->status |= St362xDensity556Bpi;
         break;
-
     case 800:
     default:
         tp->status |= St362xDensity800Bpi;
@@ -864,11 +937,16 @@ static FcStatus mt362xFunc(PpWord funcCode)
     i8        unitNo;
     TapeParam *tp;
     FcStatus  st;
-
+    #if PPDEBUG
+    mt362xLogFlush();
+    mt362xLogPpOp('F');
+    mt362xLogFlush(); 
+    #endif
     unitNo = active3000Device->selectedUnit;
     if ((unitNo != -1) && (unitNo < MaxUnits2))
         {
         tp = (TapeParam *)active3000Device->context[unitNo];
+        tp->emptyCycles = 2; // Reset empty cycles to simulate
         }
     else
         {
@@ -877,25 +955,48 @@ static FcStatus mt362xFunc(PpWord funcCode)
 
     if (tp == NULL)
         {
-        return (FcDeclined);
+            //Handle functions for unselected device
+            switch(funcCode) {
+                case Fc6681DevStatusReq:
+                    return (FcAccepted);
+				//functions that the controller always accepts
+                case Fc362xSelectBinary:
+                case Fc362xSelectCoded:
+                case Fc362xClear:
+                case Fc362xSelectIntReady:
+                case Fc362xReleaseIntReady:
+                case Fc362xSelectIntEndOfOp:
+                case Fc362xReleaseIntEndOfOp:
+                case Fc362xSelectIntError:
+	            case Fc362xReleaseIntError:
+                case Fc6681MasterClear:
+                    printf("\naccepting function %04o on unselected device activeDevice->fcode = %04o\n",funcCode,activeDevice->fcode);
+                    return (FcProcessed);
+                    break;
+                default:
+                    printf("\nrejecting function on unselected device funcCode = %04o\n activeDevice->fcode = %04o",funcCode,activeDevice->fcode);
+                    dcc6681Interrupt(1);
+                    return (FcDeclined);
+            }
         }
-
 #if DEBUG
     mt362xLogFlush();
-    fprintf(mt362xLog, "\n(mt362x ) %06d PP:%02o CH:%02o Unit:%02o f:%04o T:%-25s  >   ",
+    fprintf(mt362xLog, "\n(mt362x ) %06d PP:%02o regP:%04o regA:%06o CH:%02o Unit:%02o f:%04o T:%-25s  >   ",
             traceSequenceNo,
             activePpu->id,
+            activePpu->regP,
+            activePpu->regA,
             activeDevice->channel->id,
             unitNo,
             funcCode,
             mt362xFunc2String(funcCode));
+    mt362xLogFlush();
 #endif
-
 
     switch (funcCode)
         {
     case Fc362xRelease:
-        active3000Device->selectedUnit = -1;
+        //active3000Device->selectedUnit = -1;
         st = FcProcessed;
         break;
 
@@ -924,7 +1025,10 @@ static FcStatus mt362xFunc(PpWord funcCode)
         st          = FcProcessed;
         break;
 
+
     case Fc362xClear:
+        printf("\nfunction clear\n");
+        tp->bcdMode = FALSE;
         active3000Device->selectedUnit = -1;
         st = FcProcessed;
         break;
@@ -933,6 +1037,7 @@ static FcStatus mt362xFunc(PpWord funcCode)
         if (tp->unitReady)
             {
             mt362xResetStatus(tp);
+            tp->reverseRead = FALSE; //rewind should clear reverse read
             fseek(active3000Device->fcb[unitNo], 0, SEEK_SET);
             if (tp->blockNo != 0)
                 {
@@ -953,6 +1058,7 @@ static FcStatus mt362xFunc(PpWord funcCode)
         if (tp->unitReady)
             {
             mt362xResetStatus(tp);
+            tp->reverseRead = FALSE; //rewindUnload should clear reverse read
             tp->blockNo   = 0;
             tp->unitReady = FALSE;
             tp->ringIn    = FALSE;
@@ -1117,6 +1223,12 @@ static FcStatus mt362xFunc(PpWord funcCode)
     case Fc6681Input:
         if (tp->unitReady && ((tp->intStatus & Int362xError) == 0))
             {
+            if(activeDevice->fcode != funcCode) {
+            #if DEBUG
+            fprintf(mt362xLog,"Normalizing %04o to %04o tp->bcdMode = %d\n",activeDevice->fcode,funcCode,tp->bcdMode);
+            #endif
+            activeDevice->fcode = funcCode; //XXX make sure IO gets to us!
+            }
             mt362xResetStatus(tp);
             if (tp->reverseRead)
                 {
@@ -1140,6 +1252,12 @@ static FcStatus mt362xFunc(PpWord funcCode)
     case Fc6681Output:
         if (tp->unitReady && tp->ringIn)
             {
+            if(activeDevice->fcode != funcCode) {
+            #if DEBUG
+            fprintf(mt362xLog,"Normalizing %04o to %04o tp->bcdMode = %d\n",activeDevice->fcode,funcCode,tp->bcdMode);
+            #endif
+            activeDevice->fcode = funcCode; //XXX make sure IO gets to us!
+            }
             mt362xResetStatus(tp);
             tp->bp = tp->ioBuffer;
             active3000Device->recordLength = 0;
@@ -1165,6 +1283,7 @@ static FcStatus mt362xFunc(PpWord funcCode)
             if (tp != NULL)
                 {
                 mt362xResetStatus(tp);
+                tp->reverseRead = FALSE; //Master clear should clear reverse read
                 }
             }
 
@@ -1172,6 +1291,7 @@ static FcStatus mt362xFunc(PpWord funcCode)
         break;
 
     default:
+        tp->endOfOperation = FALSE; //If we decline a function we did not complete an operation
         st = FcDeclined;
         break;
         }
@@ -1214,10 +1334,21 @@ static void mt362xIo(void)
     */
     if (activeChannel->delayStatus != 0)
         {
+		#if PPDEBUG
+		mt362xLogPpOp('*');
+        #endif
         return;
         }
+/*     if(!activeChannel->full && active3000Device->fcode == 0) {
+         activeChannel->active = FALSE;
+         return;
+     } */
+     #if PPDEBUG
+     mt362xLogPpOp(' ');
+     #endif
+//    activeChannel->delayStatus = 2;
 
-    activeChannel->delayStatus = 0;
+
 
     /*
     **  Setup selected unit context.
@@ -1234,6 +1365,7 @@ static void mt362xIo(void)
 
     if (tp == NULL)
         {
+		printf("IO for unselected device\n");
         return;
         }
 
@@ -1245,10 +1377,13 @@ static void mt362xIo(void)
             tp->status         &= St362xClearBusy;
             activeChannel->data = tp->status;
             activeChannel->full = TRUE;
-            tp->endOfOperation  = TRUE;
+            //tp->endOfOperation  = TRUE;
+            if(tp->endOfOperation)
             tp->intStatus      |= Int362xEndOfOp;
+            //active3000Device->fcode = 0;
 #if DEBUG
             fprintf(mt362xLog, " %04o", activeChannel->data);
+            mt362xLogFlush();
 #endif
             }
         break;
@@ -1265,11 +1400,17 @@ static void mt362xIo(void)
             activeChannel->active = FALSE;
             tp->busy       = FALSE;
             tp->intStatus |= Int362xEndOfOp;
+            tp->bcdMode = FALSE; //Nos expects binary mode after end of operation
+                                 //this includes tape mark reads
             break;
             }
 
         if (tp->recordLength > 0)
             {
+            if(tp->emptyCycles > 0) { //Simulate Empty each read operation
+                tp->emptyCycles--;
+                break;
+            }
             if (tp->reverseRead)
                 {
                 activeChannel->data = *tp->bp--;
@@ -1294,6 +1435,8 @@ static void mt362xIo(void)
                 activeChannel->discAfterInput = TRUE;
                 tp->busy       = FALSE;
                 tp->intStatus |= Int362xEndOfOp;
+                tp->endOfOperation = TRUE;
+                tp->bcdMode = FALSE; //NOS treats this as the default after end of operation
                 }
             }
 
@@ -1334,7 +1477,12 @@ static void mt362xIo(void)
 **------------------------------------------------------------------------*/
 static void mt362xActivate(void)
     {
-    activeChannel->delayStatus = 5;
+    #if DEBUG
+    /*mt362xLogFlush();
+    mt362xLogPpOp('A');
+    mt362xLogFlush(); */
+    #endif
+    activeChannel->delayStatus = 4;
     }
 
 /*--------------------------------------------------------------------------
@@ -1356,7 +1504,11 @@ static void mt362xDisconnect(void)
     u32       recLen2;
     PpWord    *ip;
     u8        *rp;
-
+    #if DEBUG
+    /* mt362xLogFlush();
+    mt362xLogPpOp('D');
+    mt362xLogFlush(); */
+    #endif
     unitNo = active3000Device->selectedUnit;
     if ((unitNo != -1) && (unitNo < MaxUnits2))
         {
@@ -1372,7 +1524,7 @@ static void mt362xDisconnect(void)
     */
     activeChannel->delayDisconnect = 0;
     activeChannel->discAfterInput  = FALSE;
-
+    if(tp == NULL) { return; } //return if selectedUnit = -1
     /*
     **  Nothing more to do unless we are writing.
     */
@@ -1406,8 +1558,8 @@ static void mt362xDisconnect(void)
                 */
                 for (i = 0; i < recLen2; i++)
                     {
-                    *rp++ = bcdToAscii[(*ip >> 6) & Mask6];
-                    *rp++ = bcdToAscii[(*ip >> 0) & Mask6];
+                    *rp++ = extBcdToAscii[(*ip >> 6) & Mask6];
+                    *rp++ = extBcdToAscii[(*ip >> 0) & Mask6];
                     ip   += 1;
                     }
 
@@ -1447,8 +1599,8 @@ static void mt362xDisconnect(void)
                 */
                 for (i = 0; i < recLen2; i++)
                     {
-                    *rp++ = bcdToAscii[(*ip >> 6) & Mask6];
-                    *rp++ = bcdToAscii[(*ip >> 0) & Mask6];
+                    *rp++ = extBcdToAscii[(*ip >> 6) & Mask6];
+                    *rp++ = extBcdToAscii[(*ip >> 0) & Mask6];
                     ip   += 1;
                     }
                 }
@@ -1501,15 +1653,20 @@ static void mt362xDisconnect(void)
         **  Writing completed.
         */
         tp->writing = FALSE;
+        //XXX inserted these two lines to end of op  on writes only
+        tp->endOfOperation = TRUE;
+        tp->intStatus     |= Int362xEndOfOp;
+        tp->bcdMode = FALSE; //NOS treats binary as default after end of operation
         }
-
     tp->busy           = FALSE;
+    //XXX commented to remove unconditional end of op setting
     tp->endOfOperation = TRUE;
     tp->intStatus     |= Int362xEndOfOp;
 
     mt362xSetupStatus(tp);
     // setup any pending interrupts based on status
     dcc6681Interrupt((tp->intMask & tp->intStatus) != 0);
+    activeChannel->full = FALSE;
     }
 
 /*--------------------------------------------------------------------------
@@ -1581,7 +1738,6 @@ static void mt362xFuncRead(void)
         tp->intStatus     |= Int362xError | Int362xEndOfOp;
         tp->parityError    = TRUE;
         tp->endOfOperation = TRUE;
-
         return;
         }
 
@@ -2198,7 +2354,7 @@ static void mt362xPackAndConvert(u32 recLen)
 
         for (i = 0; i < recLen; i += 2)
             {
-            *op++ = ((PpWord)asciiToBcd[rp[0]] << 6) | ((PpWord)asciiToBcd[rp[1]] << 0);
+            *op++ = ((PpWord)asciiToExtBcd[rp[0]] << 6) | ((PpWord)asciiToExtBcd[rp[1]] << 0);
             rp   += 2;
             }
 
@@ -2313,7 +2469,6 @@ static char *mt362xFunc2String(PpWord funcCode)
 
     case Fc362xSelect800Bpi:
         return "Fc362xSelect800Bpi";
-
     case Fc362xRewind:
         return "Fc362xRewind";
 
