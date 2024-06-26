@@ -25,7 +25,7 @@
 **--------------------------------------------------------------------------
 */
 
-#define DEBUG    1
+#define DEBUG    0
 #define PPDEBUG 0
 /*
 **  -------------
@@ -960,17 +960,29 @@ static FcStatus mt362xFunc(PpWord funcCode)
                 case Fc6681DevStatusReq:
                     return (FcAccepted);
 				//functions that the controller always accepts
-                case Fc362xSelectBinary:
-                case Fc362xSelectCoded:
-                case Fc362xClear:
                 case Fc362xSelectIntReady:
                 case Fc362xReleaseIntReady:
                 case Fc362xSelectIntEndOfOp:
                 case Fc362xReleaseIntEndOfOp:
                 case Fc362xSelectIntError:
 	            case Fc362xReleaseIntError:
+                    return (FcProcessed);
                 case Fc6681MasterClear:
                     printf("\naccepting function %04o on unselected device activeDevice->fcode = %04o\n",funcCode,activeDevice->fcode);
+                    active3000Device->selectedUnit = -1;
+                    for (unitNo = 0; unitNo < 16; unitNo++)
+                    {
+                        tp = (TapeParam *)active3000Device->context[unitNo];
+                        if (tp != NULL)
+                        {
+                            mt362xResetStatus(tp);
+                            tp->bcdMode = FALSE;
+                            tp->intMask = 0;
+                            tp->intStatus = 0;
+                            tp->reverseRead = FALSE; //Master clear should clear reverse read
+                        }
+                    }
+
                     return (FcProcessed);
                     break;
                 default:
@@ -997,6 +1009,9 @@ static FcStatus mt362xFunc(PpWord funcCode)
         {
     case Fc362xRelease:
         //active3000Device->selectedUnit = -1;
+        tp->bcdMode = FALSE; //This is counter to the manual
+                             //but it seems to be the only sane way to get the effects
+                             //that operating systems like NOS seem to assume.
         st = FcProcessed;
         break;
 
@@ -1006,7 +1021,9 @@ static FcStatus mt362xFunc(PpWord funcCode)
         break;
 
     case Fc362xSelectCoded:
-        tp->bcdMode = TRUE;
+        //Disable ASCII translation for now to test how it
+        //affects operation
+        //tp->bcdMode = TRUE;
         st          = FcProcessed;
         break;
 
@@ -1037,7 +1054,6 @@ static FcStatus mt362xFunc(PpWord funcCode)
         if (tp->unitReady)
             {
             mt362xResetStatus(tp);
-            tp->reverseRead = FALSE; //rewind should clear reverse read
             fseek(active3000Device->fcb[unitNo], 0, SEEK_SET);
             if (tp->blockNo != 0)
                 {
@@ -1045,6 +1061,7 @@ static FcStatus mt362xFunc(PpWord funcCode)
                     {
                     tp->rewinding   = TRUE;
                     tp->rewindStart = cycles;
+                    tp->reverseRead = FALSE; //reverse read makes no sense ater a rewind
                     }
                 }
 
@@ -1058,7 +1075,6 @@ static FcStatus mt362xFunc(PpWord funcCode)
         if (tp->unitReady)
             {
             mt362xResetStatus(tp);
-            tp->reverseRead = FALSE; //rewindUnload should clear reverse read
             tp->blockNo   = 0;
             tp->unitReady = FALSE;
             tp->ringIn    = FALSE;
@@ -1066,6 +1082,7 @@ static FcStatus mt362xFunc(PpWord funcCode)
             active3000Device->fcb[unitNo] = NULL;
             tp->endOfOperation            = TRUE;
             tp->intStatus |= Int362xEndOfOp;
+            tp->reverseRead = FALSE; //reverse read makes no sense after an unload
             }
 
         st = FcProcessed;
@@ -1291,7 +1308,6 @@ static FcStatus mt362xFunc(PpWord funcCode)
         break;
 
     default:
-        tp->endOfOperation = FALSE; //If we decline a function we did not complete an operation
         st = FcDeclined;
         break;
         }
@@ -1377,8 +1393,7 @@ static void mt362xIo(void)
             tp->status         &= St362xClearBusy;
             activeChannel->data = tp->status;
             activeChannel->full = TRUE;
-            //tp->endOfOperation  = TRUE;
-            if(tp->endOfOperation)
+            tp->endOfOperation  = TRUE;
             tp->intStatus      |= Int362xEndOfOp;
             //active3000Device->fcode = 0;
 #if DEBUG
@@ -1400,8 +1415,6 @@ static void mt362xIo(void)
             activeChannel->active = FALSE;
             tp->busy       = FALSE;
             tp->intStatus |= Int362xEndOfOp;
-            tp->bcdMode = FALSE; //Nos expects binary mode after end of operation
-                                 //this includes tape mark reads
             break;
             }
 
@@ -1420,14 +1433,15 @@ static void mt362xIo(void)
                 activeChannel->data = *tp->bp++;
                 }
 
+
+            activeChannel->full = TRUE;
 #if DEBUG
             mt362xLogByte(activeChannel->data);
 #endif
-
-            activeChannel->full = TRUE;
             tp->recordLength   -= 1;
             if (tp->recordLength == 0)
                 {
+
                 /*
                 **  Last word deactivates function.
                 */
@@ -1436,7 +1450,6 @@ static void mt362xIo(void)
                 tp->busy       = FALSE;
                 tp->intStatus |= Int362xEndOfOp;
                 tp->endOfOperation = TRUE;
-                tp->bcdMode = FALSE; //NOS treats this as the default after end of operation
                 }
             }
 
@@ -1653,13 +1666,8 @@ static void mt362xDisconnect(void)
         **  Writing completed.
         */
         tp->writing = FALSE;
-        //XXX inserted these two lines to end of op  on writes only
-        tp->endOfOperation = TRUE;
-        tp->intStatus     |= Int362xEndOfOp;
-        tp->bcdMode = FALSE; //NOS treats binary as default after end of operation
         }
     tp->busy           = FALSE;
-    //XXX commented to remove unconditional end of op setting
     tp->endOfOperation = TRUE;
     tp->intStatus     |= Int362xEndOfOp;
 
